@@ -1,14 +1,26 @@
 # pi-promptimize
 
-`/promptimize` for the [pi coding agent](https://github.com/earendil-works/pi): a popup where you type a rough prompt, pick a size and get an optimized prompt back, after a short interview when the prompt leaves real gaps.
+`/promptimize` for the [pi coding agent](https://github.com/earendil-works/pi) and [oh-my-pi](https://github.com/oh-my-pi/pi-coding-agent): a popup where you type a rough prompt, pick a size and get an optimized prompt back, after a short interview when the prompt leaves real gaps.
 
 ## Install
+
+**pi**
 
 ```bash
 pi install git:github.com/dimitritholen/pi-promptimize
 ```
 
 The repo is private: git on that machine needs access to it (`gh auth login` + `gh auth setup-git`, or an SSH key).
+
+**oh-my-pi (omp)**
+
+```bash
+omp plugin install git:github.com/KD-MM2/pi-promptimize
+```
+
+omp loads the same extension through its pi-compat layer; the few APIs the two hosts differ on
+(settings, model listing, thinking level, key resolution, theme symbols) are detected and
+adapted at runtime in `extensions/promptimize/host.ts`.
 
 ## Use
 
@@ -27,6 +39,8 @@ Keys in the compose step: Tab moves between fields, ←/→ or 1-3 picks the siz
 
 ## Settings
 
+### pi
+
 In `~/.pi/agent/settings.json` (or a project's `.pi/settings.json`):
 
 ```json
@@ -36,10 +50,27 @@ In `~/.pi/agent/settings.json` (or a project's `.pi/settings.json`):
 }
 ```
 
-- `model`: the model the popup starts with, as `provider/id`. Default: the session's model. A model you pick in the popup wins until pi restarts. Unknown ids fall back to the session model with a warning.
+### oh-my-pi
+
+```bash
+omp plugin config set pi-promptimize model anthropic/claude-opus-5-5
+omp plugin config set pi-promptimize includeContext true
+```
+
+Stored in `~/.omp/plugins/omp-plugins.lock.json` under `settings.pi-promptimize`. For a per-project override, create `<project>/.omp/plugin-overrides.json`:
+
+```json
+{ "settings": { "pi-promptimize": { "model": "anthropic/claude-opus-4-8" } } }
+```
+
+`PROMPTIMIZE_MODEL` and `PROMPTIMIZE_INCLUDE_CONTEXT` (`1|true|yes|on`) are honored as fallbacks when nothing is stored.
+
+### Both hosts
+
+- `model`: the model the popup starts with, as `provider/id`. Default: the session's model. A model you pick in the popup wins until the process restarts. Unknown ids fall back to the session model with a warning.
 - `includeContext`: the default of the context box. Default `false`; it costs tokens.
 
-It uses the session's thinking level; the interview call is capped at low. If a model rejects the thinking level, the call is retried once without it.
+It uses the session's thinking level; the interview call is capped at low. If a model rejects the thinking level, the call is retried once without it. On oh-my-pi, model calls go through pi-ai's `streamSimple` with the registry's per-request key resolver, so stored API keys and OAuth credentials both work. On pi, calls go through `modelRegistry.streamSimple` as usual.
 
 ## Test
 

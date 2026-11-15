@@ -1,9 +1,19 @@
 {
   "name": "pi-promptimize",
-  "version": "1.2.0",
-  "description": "/promptimize for the pi coding agent: turn a rough prompt into an optimized one (small, medium or large) in a popup, after a short interview",
+  "version": "1.3.0",
+  "description": "/promptimize for the pi and oh-my-pi coding agents: turn a rough prompt into an optimized one (small, medium or large) in a popup, after a short interview",
   "keywords": [
-    "pi-package"
+    "pi-package",
+    "omp-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KD-MM2/pi-promptimize.git"
+  },
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
   ],
   "license": "MIT",
   "type": "module",
@@ -11,6 +21,28 @@
     "extensions": [
       "./extensions/promptimize/index.ts"
     ]
+  },
+  "omp": {
+    "extensions": [
+      "./extensions/promptimize/index.ts"
+    ],
+    "settings": {
+      "model": {
+        "type": "string",
+        "description": "Model for the popup, as provider/id (e.g. anthropic/claude-opus-4-8). Default: the session model.",
+        "env": "PROMPTIMIZE_MODEL"
+      },
+      "includeContext": {
+        "type": "boolean",
+        "default": false,
+        "description": "Tick \"Include recent session context\" by default (costs tokens).",
+        "env": "PROMPTIMIZE_INCLUDE_CONTEXT"
+      }
+    }
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   },
   "scripts": {
     "test": "node --test test/*.test.ts",

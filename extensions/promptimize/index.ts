@@ -4,29 +4,34 @@
  * interviews you when the prompt leaves real gaps, then shows the optimized prompt for review:
  * use it, regenerate it, or switch size. "Use" puts it in the main editor.
  *
- * Settings (settings.json): "promptimize": { "model": "provider/id", "includeContext": false }
+ * Runs on both the pi coding agent and oh-my-pi; host differences are isolated in ./host.ts.
+ *
+ * Settings:
+ * - pi: `"promptimize": { "model": "provider/id", "includeContext": false }` in ~/.pi/agent/settings.json (or a project's .pi/settings.json)
+ * - oh-my-pi: `omp plugin config set pi-promptimize model provider/id` and `omp plugin config set pi-promptimize includeContext true`
+ *   (per-project override: <project>/.omp/plugin-overrides.json → { "settings": { "pi-promptimize": { ... } } })
  */
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
-import { Editor, type EditorTheme, type Focusable, fuzzyFilter, Key, matchesKey, SelectList, type TUI, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Editor, type Focusable, fuzzyFilter, Key, matchesKey, SelectList, type TUI, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { askQuestions, type Llm, type QA, type Question, type Request, resolveAnswer, rewrite, SIZE_SPEC, SIZES, type Size } from "./core.ts";
+import { detectHost, findModel, listModels, loadOmpStreamSimple, makeStreamSimple, modelLike, readSettings, resolveSymbols, thinkingLevel, type Host, type HostSettings, type ModelLike, type SymbolThemeLike } from "./host.ts";
 
-// alt+p only works when the terminal sends Option as Alt (Ghostty: macos-option-as-alt); ctrl+r is pi's session rename.
+// alt+p only works when the terminal sends Option as Alt (Ghostty: macos-option-as-alt); ctrl+r is the session rename in both hosts.
 const SHORTCUTS = ["alt+p"] as const;
 const CONTEXT_MESSAGES = 10;
 const CONTEXT_CHARS = 16_000;
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-interface Settings {
-	model?: string;
-	includeContext?: boolean;
-}
+type Settings = HostSettings;
+// omp's Editor constructor takes (theme); pi's takes (tui, theme). One call site per host, so a single
+// named cast covers both; the instance type is the same Editor either way.
+const EditorCtor = Editor as unknown as { new (...args: unknown[]): Editor };
 
-// What the popup remembers between openings in this pi process.
+// What the popup remembers between openings in this process.
 const last = { prompt: "", sizeIdx: 1, includeContext: undefined as boolean | undefined, model: undefined as string | undefined };
 
-type Model = NonNullable<ExtensionContext["model"]>;
-const idOf = (m: Model) => `${m.provider}/${m.id}`;
+const idOf = (m: ModelLike) => `${m.provider}/${m.id}`;
 
 /** The recent conversation on the current branch, serialized and capped; undefined when there is none. */
 function sessionContext(ctx: ExtensionContext): string | undefined {
@@ -39,14 +44,14 @@ function sessionContext(ctx: ExtensionContext): string | undefined {
 	return text.length > CONTEXT_CHARS ? `…${text.slice(-CONTEXT_CHARS)}` : text;
 }
 
-/** The model last picked in the popup, else settings.promptimize.model, else the session model. */
-function pickModel(ctx: ExtensionContext, settings: Settings): { model: ExtensionContext["model"]; warning?: string } {
+/** The model last picked in the popup, else the configured model, else the session model. */
+function pickModel(ctx: ExtensionContext, settings: Settings): { model: ModelLike | undefined; warning?: string } {
 	const id = (last.model ?? settings.model)?.trim();
-	if (!id) return { model: ctx.model };
-	const slash = id.indexOf("/");
-	const model = slash > 0 ? ctx.modelRegistry.find(id.slice(0, slash), id.slice(slash + 1)) : undefined;
-	if (model) return { model };
-	return { model: ctx.model, warning: `promptimize: model "${id}" not found, using the session model.` };
+	const sessionModel = modelLike(ctx.model);
+	if (!id) return { model: sessionModel };
+	const found = findModel(ctx, id);
+	if (found) return { model: found };
+	return { model: sessionModel, warning: `promptimize: model "${id}" not found, using the session model.` };
 }
 
 type Stage = "compose" | "pick" | "interview" | "result";
@@ -57,7 +62,7 @@ const ZONES = 5;
 class PromptimizePopup implements Focusable {
 	private stage: Stage = "compose";
 	private zone: number = Z.prompt;
-	private models: Model[];
+	private models: ModelLike[];
 	private picker: SelectList | undefined;
 	private filter = "";
 	private sizeIdx: number;
@@ -79,34 +84,40 @@ class PromptimizePopup implements Focusable {
 	private ctx: ExtensionContext;
 	private llm: Llm;
 	private done: (r: string | null) => void;
+	private host: Host;
+	private symbols?: SymbolThemeLike;
 
-	constructor(tui: TUI, theme: Theme, ctx: ExtensionContext, llm: Llm, models: Model[], settings: Settings, done: (r: string | null) => void, initial: string) {
+	constructor(tui: TUI, theme: Theme, ctx: ExtensionContext, llm: Llm, models: ModelLike[], settings: Settings, done: (r: string | null) => void, initial: string, host: Host, symbols?: SymbolThemeLike) {
 		this.models = models;
 		this.tui = tui;
 		this.theme = theme;
 		this.ctx = ctx;
 		this.llm = llm;
 		this.done = done;
+		this.host = host;
+		this.symbols = symbols;
 		this.sizeIdx = last.sizeIdx;
 		this.includeContext = last.includeContext ?? settings.includeContext ?? false;
-		const editorTheme = (active: () => boolean): EditorTheme => ({
-			borderColor: (s) => theme.fg(active() ? "accent" : "dim", s),
-			selectList: {
-				selectedPrefix: (t) => theme.fg("accent", t),
-				selectedText: (t) => theme.fg("accent", t),
-				description: (t) => theme.fg("muted", t),
-				scrollInfo: (t) => theme.fg("dim", t),
-				noMatch: (t) => theme.fg("warning", t),
-			},
-		});
-		this.editor = new Editor(tui, editorTheme(() => this.zone === Z.prompt));
+		// omp's Editor/SelectList themes require a `symbols` object (Editor dereferences it
+		// unguarded); pi's ignore it. See selectListTheme().
+		const editorTheme = (active: () => boolean) => {
+			const themeForEditor = {
+				borderColor: (s: string) => theme.fg(active() ? "accent" : "dim", s),
+				selectList: this.selectListTheme(),
+			};
+			// omp: new Editor(theme) and the theme requires symbols; pi: new Editor(tui, theme).
+			return this.host === "omp" && this.symbols ? { ...themeForEditor, symbols: this.symbols } : themeForEditor;
+		};
+		const makeEditor = (active: () => boolean): Editor =>
+			this.host === "omp" ? new EditorCtor(editorTheme(active)) : new Editor(tui, editorTheme(active));
+		this.editor = makeEditor(() => this.zone === Z.prompt);
 		this.editor.setText(initial || last.prompt);
 		// Editor clears itself before onSubmit; put the text back so it stays visible.
 		this.editor.onSubmit = (text) => {
 			this.editor.setText(text);
 			void this.start();
 		};
-		this.answer = new Editor(tui, editorTheme(() => true));
+		this.answer = makeEditor(() => true);
 		this.answer.onSubmit = (text) => {
 			this.qa.push(resolveAnswer(this.questions[this.qIdx], text));
 			this.qIdx++;
@@ -114,7 +125,17 @@ class PromptimizePopup implements Focusable {
 			else void this.nextRound();
 		};
 	}
-
+	private selectListTheme() {
+		const t = this.theme;
+		return {
+			selectedPrefix: (s: string) => t.fg("accent", s),
+			selectedText: (s: string) => t.fg("accent", s),
+			description: (s: string) => t.fg("muted", s),
+			scrollInfo: (s: string) => t.fg("dim", s),
+			noMatch: (s: string) => t.fg("warning", s),
+			...(this.symbols ? { symbols: this.symbols } : {}),
+		};
+	}
 	get focused() {
 		return this._focused;
 	}
@@ -141,11 +162,16 @@ class PromptimizePopup implements Focusable {
 		this.tui.requestRender();
 	}
 
-	private get modelIdx(): number {
-		return this.models.findIndex((m) => idOf(m) === idOf(this.llm.model as Model));
+	private currentModel(): ModelLike {
+		// llm.model is always a resolved Model at runtime; models[] is seeded before first render.
+		return modelLike(this.llm.model) ?? this.models[0];
 	}
 
-	private setModel(m: Model) {
+	private get modelIdx(): number {
+		return this.models.findIndex((m) => idOf(m) === idOf(this.currentModel()));
+	}
+
+	private setModel(m: ModelLike) {
 		this.llm.model = m;
 		this.tui.requestRender();
 	}
@@ -161,14 +187,7 @@ class PromptimizePopup implements Focusable {
 	private buildPicker() {
 		const all = this.models.map((m) => ({ value: idOf(m), label: idOf(m), description: m.name && m.name !== m.id ? m.name : undefined }));
 		const items = this.filter ? fuzzyFilter(all, this.filter, (i) => i.label) : all;
-		const t = this.theme;
-		this.picker = new SelectList(items, 10, {
-			selectedPrefix: (s) => t.fg("accent", s),
-			selectedText: (s) => t.fg("accent", s),
-			description: (s) => t.fg("muted", s),
-			scrollInfo: (s) => t.fg("dim", s),
-			noMatch: (s) => t.fg("warning", s),
-		});
+		this.picker = new SelectList(items, 10, this.selectListTheme());
 	}
 
 	private pickInput(data: string) {
@@ -199,7 +218,7 @@ class PromptimizePopup implements Focusable {
 		last.prompt = result === null ? this.editor.getExpandedText() : ""; // a used prompt starts fresh next time
 		last.sizeIdx = this.sizeIdx;
 		last.includeContext = this.includeContext;
-		last.model = idOf(this.llm.model as Model);
+		last.model = idOf(this.currentModel());
 		this.done(result);
 	}
 
@@ -373,7 +392,7 @@ class PromptimizePopup implements Focusable {
 			lines.push(...wrap(t.fg("dim", "Enter answer (empty takes the default, - skips) • Shift+Enter newline • Tab use defaults and generate • Esc close")));
 		} else {
 			const pos = this.models.length ? ` (${this.modelIdx + 1}/${this.models.length})` : "";
-			const name = t.fg(this.zone === Z.model ? "accent" : "text", idOf(this.llm.model as Model));
+			const name = t.fg(this.zone === Z.model ? "accent" : "text", idOf(this.currentModel()));
 			lines.push(`${t.fg(this.zone === Z.model ? "text" : "muted", "Model:")}    ${name}${t.fg("dim", `${pos}${this.zone === Z.model ? "  ←/→ switch · Enter list" : ""}`)}`);
 			lines.push("");
 			lines.push(t.fg(this.zone === Z.prompt ? "text" : "muted", "Your rough prompt:"));
@@ -414,24 +433,39 @@ async function open(pi: ExtensionAPI, ctx: ExtensionContext, initial = "") {
 		ctx.ui.notify("promptimize needs interactive mode", "error");
 		return;
 	}
-	const settings: Settings = (pi.getSettings() as { promptimize?: Settings }).promptimize ?? {};
+	const host = detectHost(pi);
+	const settings: Settings = await readSettings(host, pi, ctx.cwd);
+	const [symbols, ompStreamSimple] = await Promise.all([
+		host === "omp" ? resolveSymbols() : undefined,
+		host === "omp" ? loadOmpStreamSimple().catch((err: Error) => err) : undefined,
+	]);
+	if (ompStreamSimple instanceof Error) {
+		ctx.ui.notify(`promptimize: ${ompStreamSimple.message}`, "error");
+		return;
+	}
 	const { model, warning } = pickModel(ctx, settings);
 	if (warning) ctx.ui.notify(warning, "warning");
 	if (!model) {
 		ctx.ui.notify("promptimize: no model selected.", "error");
 		return;
 	}
-	const llm: Llm = {
-		streamSimple: (m, c, o) => ctx.modelRegistry.streamSimple(m as never, c as never, o as never),
-		model,
-		thinkingLevel: ctx.thinkingLevel,
-		cwd: ctx.cwd,
-	};
-	// Same list /model shows: the scoped models when set, else every model with auth.
-	const models = ctx.scopedModels.length ? ctx.scopedModels.map((s) => s.model) : [...ctx.modelRegistry.getAvailable()];
+	let llm: Llm;
+	try {
+		llm = {
+			streamSimple: makeStreamSimple(host, ctx, ompStreamSimple),
+			model,
+			thinkingLevel: thinkingLevel(pi, ctx),
+			cwd: ctx.cwd,
+		};
+	} catch (err) {
+		ctx.ui.notify(`promptimize: ${(err as Error).message}`, "error");
+		return;
+	}
+	// Same list /model shows: the scoped models when set (pi), else every model with auth (omp).
+	const models = listModels(host, ctx);
 	if (!models.some((m) => idOf(m) === idOf(model))) models.unshift(model);
 	const result = await ctx.ui.custom<string | null>(
-		(tui, theme, _kb, done) => new PromptimizePopup(tui, theme, ctx, llm, models, settings, done, initial),
+		(tui, theme, _kb, done) => new PromptimizePopup(tui, theme, ctx, llm, models, settings, done, initial, host, symbols),
 		{ overlay: true, overlayOptions: { anchor: "center", width: "70%", minWidth: 50 } },
 	);
 	if (!result) return;

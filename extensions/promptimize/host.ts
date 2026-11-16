@@ -1,6 +1,6 @@
 /**
  * Host adapter: this extension runs on both the pi coding agent
- * (github.com/earendil-works/pi) and oh-my-pi (github.com/oh-my-pi/pi-coding-agent).
+ * (github.com/earendil-works/pi) and oh-my-pi (github.com/can1357/oh-my-pi).
  * oh-my-pi remaps `@earendil-works/*` imports onto its bundled host packages, so the
  * module surface mostly matches; a few runtime APIs do not (settings, model listing,
  * thinking level, streamSimple, symbol theme). Everything host-specific lives here.

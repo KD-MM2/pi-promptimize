@@ -1,6 +1,6 @@
 # pi-promptimize
 
-`/promptimize` for the [pi coding agent](https://github.com/earendil-works/pi) and [oh-my-pi](https://github.com/oh-my-pi/pi-coding-agent): a popup where you type a rough prompt, pick a size and get an optimized prompt back, after a short interview when the prompt leaves real gaps.
+`/promptimize` for the [pi coding agent](https://github.com/earendil-works/pi) and [oh-my-pi](https://github.com/can1357/oh-my-pi): a popup where you type a rough prompt, pick a size and get an optimized prompt back, after a short interview when the prompt leaves real gaps.
 
 ## Install
 
